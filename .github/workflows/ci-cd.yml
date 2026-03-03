@@ -1,0 +1,34 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t rainy-partner .
+          docker tag rainy-partner:latest 195714074957.dkr.ecr.ap-south-1.amazonaws.com/rainy-partner:latest
+          docker push 195714074957.dkr.ecr.ap-south-1.amazonaws.com/rainy-partner:latest
+
+      - name: Deploy via Instance Refresh
+        run: |
+          aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name rainy-partner-asg \
+            --preferences '{"MinHealthyPercentage": 50, "InstanceWarmup": 60}'

@@ -32,3 +32,4 @@ jobs:
           aws autoscaling start-instance-refresh \
             --auto-scaling-group-name rainy-partner-asg \
             --preferences '{"MinHealthyPercentage": 50, "InstanceWarmup": 60}'
+            

@@ -77,7 +77,7 @@ app.use(morgan("combined"));
 app.use(requestLogger);
 
 app.get("/", (req, res) => {
-  res.send("Welcome to the Rainy Partner API");
+  res.send("Welcome to the Rainy Partner API V2");
 });
 
 app.get("/health", (req, res) => {

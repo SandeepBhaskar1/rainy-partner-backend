@@ -333,7 +333,7 @@ router.post(
     const admin = new User({
       name: name || "Administrator",
       email,
-      phone: phone || "9999999999",
+      phone: phone || `9${Date.now().toString().slice(-9)}`,
       password_hash,
       role: "ADMIN",
       needs_onboarding: false,
@@ -342,7 +342,7 @@ router.post(
 
     await admin.save();
 
-    const accessToken = generateToken(admin);
+    const accessToken = generateAdminToken(admin);
 
     res.status(201).json({
       message: "Admin registered successfully",

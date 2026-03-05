@@ -18,6 +18,14 @@ const kycRoutes = require("./routes/kycs");
 
 const { errorHandler } = require("./middleware/errorHandler");
 const { requestLogger } = require("./middleware/logger");
+const { default: mongoose } = require("mongoose");
+
+if (mongoose.connection.readyState === 0) {
+  const mongoUrl = process.env.MONGO_URL || process.env.MONGODB_URI;
+  if (mongoUrl) {
+    mongoose.connect(mongoUrl).catch(err => console.error("MongoDB connection error:", err));
+  }
+}
 
 const app = express();
 
@@ -76,40 +84,13 @@ app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok", ts: new Date().toISOString() });
 });
 
-app.get("/api/health", async (req, res) => {
-  try {
-    const mongoose = require("mongoose");
-    const dbState = mongoose.connection.readyState;
-    const dbStatus = dbState === 1 ? "connected" : "disconnected";
+app.get("/api/health", (req, res) => {
+  const dbState = mongoose.connection.readyState;
 
-    const collections = await mongoose.connection.db.listCollections().toArray();
-    const collectionsInfo = {};
-    for (const collection of collections) {
-      const count = await mongoose.connection.db
-        .collection(collection.name)
-        .countDocuments();
-      collectionsInfo[collection.name] = { documents: count, status: "connected" };
-    }
-
-    res.json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
-      services: { database: dbStatus, s3: "available" },
-      database: {
-        type: "MongoDB",
-        name: process.env.DB_NAME,
-        collections: collectionsInfo,
-        total_collections: collections.length,
-        node_env: process.env.NODE_ENV,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: "unhealthy",
-      error: error.message,
-      timestamp: new Date().toISOString(),
-    });
-  }
+  res.json({
+    status: "healthy",
+    database: dbState === 1 ? "connected" : "disconnected"
+  });
 });
 
 app.use("/api", projectRoute);

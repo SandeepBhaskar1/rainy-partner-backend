@@ -33,9 +33,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: |
-          npm cache clean --force
-          npm ci
+        run: npm install --legacy-peer-deps --no-integrity
 
       - name: Run tests
         run: npm test
@@ -76,6 +74,20 @@ jobs:
 
       - name: Deploy via Instance Refresh
         run: |
+          # Cancel any in-progress refresh first
+          REFRESH_ID=$(aws autoscaling describe-instance-refreshes \
+            --auto-scaling-group-name rainy-partner-asg \
+            --query "InstanceRefreshes[?Status=='InProgress'].InstanceRefreshId" \
+            --output text)
+          
+          if [ -n "$REFRESH_ID" ] && [ "$REFRESH_ID" != "None" ]; then
+            echo "Cancelling in-progress refresh: $REFRESH_ID"
+            aws autoscaling cancel-instance-refresh \
+              --auto-scaling-group-name rainy-partner-asg
+            echo "Waiting for cancellation..."
+            sleep 30
+          fi
+          
           aws autoscaling start-instance-refresh \
             --auto-scaling-group-name rainy-partner-asg \
             --preferences '{"MinHealthyPercentage": 50, "InstanceWarmup": 60}'

@@ -6,16 +6,13 @@ const {
   generateAdminToken,
   generateToken,
   generateAdminRefreshToken,
-  verifyAdminToken,
 } = require("../middleware/auth");
 const { APIError, asyncHandler } = require("../middleware/errorHandler");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
+const redisClient = require("../config/redis");
 
 const router = express.Router();
-
-const otpStorage = new Map();
-const rateLimitStorage = new Map();
 
 const TEST_PHONE = "9876543210";
 const TEST_OTP = "720477";
@@ -42,7 +39,7 @@ const sendOTPViaSMS = async (phone, otp) => {
           authorization: process.env.FAST2SMS_API_KEY,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     return response.data;
@@ -51,22 +48,6 @@ const sendOTPViaSMS = async (phone, otp) => {
     throw new Error("Failed to send OTP");
   }
 };
-
-setInterval(() => {
-  const now = Date.now();
-  
-  for (const [key, value] of otpStorage.entries()) {
-    if (value.expires < now) {
-      otpStorage.delete(key);
-    }
-  }
-  
-  for (const [key, value] of rateLimitStorage.entries()) {
-    if (value.resetTime < now) {
-      rateLimitStorage.delete(key);
-    }
-  }
-}, 60000);
 
 router.post(
   "/send-otp",
@@ -85,43 +66,22 @@ router.post(
     }
 
     const { identifier } = req.body;
-
-    const rateLimitKey = `rate_${identifier}`;
-    const rateLimit = rateLimitStorage.get(rateLimitKey);
     const now = Date.now();
 
-    if (rateLimit) {
-      if (rateLimit.count >= 3 && rateLimit.resetTime > now) {
-        const waitMinutes = Math.ceil((rateLimit.resetTime - now) / 60000);
-        return res.status(429).json({
-          detail: `Too many OTP requests. Please try again after ${waitMinutes} minutes`,
-          retryAfter: Math.ceil((rateLimit.resetTime - now) / 1000),
-        });
-      }
-      
-      if (rateLimit.resetTime <= now) {
-        rateLimitStorage.set(rateLimitKey, {
-          count: 1,
-          resetTime: now + 15 * 60 * 1000,
-        });
-      } else {
-        rateLimit.count++;
-      }
-    } else {
-      rateLimitStorage.set(rateLimitKey, {
-        count: 1,
-        resetTime: now + 15 * 60 * 1000,
+    const rateKey = `rate:${identifier}`;
+    const count = await redisClient.incr(rateKey);
+    
+    if (count === 1) {
+      await redisClient.expire(rateKey, 900);
+    }
+
+    if (count > 3) {
+      return res.status(429).json({
+        detail: "Too many OTP requests. Please try again after 15 minutes.",
+        retryAfter: 900,
       });
     }
 
-    const existingOtp = otpStorage.get(identifier);
-    if (existingOtp && existingOtp.expires > now) {
-      const remainingSeconds = Math.ceil((existingOtp.expires - now) / 1000);
-      return res.status(429).json({
-        detail: `OTP already sent. Please wait ${remainingSeconds} seconds before requesting a new one`,
-        retryAfter: remainingSeconds,
-      });
-    }
 
     if (identifier === TEST_PHONE) {
       const otpData = {
@@ -130,8 +90,13 @@ router.post(
         attempts: 0,
         createdAt: now,
       };
-      
-      otpStorage.set(identifier, {...otpData});
+
+      await redisClient.set(
+        `otp:${identifier}`,
+        JSON.stringify({ otp: TEST_OTP, attempts: 0 }),
+        "EX",
+        300,
+      );
 
       return res.json({
         message: "OTP sent successfully",
@@ -141,17 +106,20 @@ router.post(
     }
 
     const otp = generateOTP();
-    
+
     const otpData = {
       otp,
-      expires: now + 5 * 60 * 1000,
       attempts: 0,
-      createdAt: now,
     };
-    
-    otpStorage.set(identifier, {...otpData});
-    
-    const storedOtp = otpStorage.get(identifier);
+
+    await redisClient.set(
+      `otp:${identifier}`,
+      JSON.stringify(otpData),
+      "EX",
+      300,
+    )
+
+    const storedOtp = await redisClient.get(`otp:${identifier}`);
     if (!storedOtp) {
       console.error("Failed to store OTP");
       return res.status(500).json({
@@ -170,7 +138,7 @@ router.post(
       expiresIn: 300,
       ...(process.env.NODE_ENV === "development" && { otp }),
     });
-  })
+  }),
 );
 
 router.post(
@@ -194,41 +162,50 @@ router.post(
 
     const { identifier, otp } = req.body;
     const now = Date.now();
-    
-    const otpData = otpStorage.get(identifier);
-    
-    if (!otpData) {
-      return res.status(400).json({ 
-        detail: "OTP not found. Please request a new OTP" 
+
+    const data = await redisClient.get(`otp:${identifier}`);
+
+    if (!data) {
+      return res.status(400).json({
+        detail: "OTP expired or not found. Please request a new OTP",
       });
     }
+    const otpData = JSON.parse(data);
 
     if (otpData.expires < now) {
-      otpStorage.delete(identifier);
-      return res.status(400).json({ 
-        detail: "OTP has expired. Please request a new OTP" 
+      await  redisClient.delete(`otp:${identifier}`);
+      return res.status(400).json({
+        detail: "OTP has expired. Please request a new OTP",
       });
     }
 
-    if (otpData.attempts >= 5) {
-      otpStorage.delete(identifier);
-      return res.status(400).json({ 
-        detail: "Too many failed attempts. Please request a new OTP" 
+    if (otpData.attempts >= 3) {
+      await redisClient.delete(`otp:${identifier}`);
+      return res.status(400).json({
+        detail: "Too many failed attempts. Please request a new OTP",
       });
     }
 
     if (otpData.otp !== otp) {
-      otpStorage.set(identifier, { ...otpData, attempts: otpData.attempts + 1 });
-      
-      const remainingAttempts = 5 - otpData.attempts;
-      
-      return res.status(400).json({ 
-        detail: `Invalid OTP. ${remainingAttempts} attempt${remainingAttempts !== 1 ? 's' : ''} remaining` 
+      await redisClient.set(
+        `otp:${identifier}`,
+        JSON.stringify({
+          ...otpData,
+          attempts: otpData.attempts + 1,
+        }),
+        "EX",
+        300
+      );
+
+      const remainingAttempts = 3 - otpData.attempts;
+
+      return res.status(400).json({
+        detail: `Invalid OTP. ${remainingAttempts} attempt${remainingAttempts !== 1 ? "s" : ""} remaining`,
       });
     }
 
-    otpStorage.delete(identifier);
-    rateLimitStorage.delete(`rate_${identifier}`);
+    await redisClient.del(`otp:${identifier}`);
+    await redisClient.del(`rate:${identifier}`);
 
     let user = await User.findByPhone(identifier);
 
@@ -294,7 +271,7 @@ router.post(
       access_token: accessToken,
       user: userData,
     });
-  })
+  }),
 );
 
 router.post(
@@ -354,7 +331,7 @@ router.post(
         role: admin.role,
       },
     });
-  })
+  }),
 );
 
 router.post(
@@ -427,7 +404,7 @@ router.post(
         error: error.message,
       });
     }
-  })
+  }),
 );
 
 router.post(
@@ -461,7 +438,7 @@ router.post(
 
       console.log(
         "✅ Found coordinator:",
-        coordinator.email || coordinator.phone
+        coordinator.email || coordinator.phone,
       );
 
       if (coordinator.role !== "COORDINATOR") {
@@ -515,7 +492,7 @@ router.post(
         .status(500)
         .json({ message: "Server error", error: error.message });
     }
-  }
+  },
 );
 
 router.post(
@@ -530,11 +507,11 @@ router.post(
     try {
       const decoded = jwt.verify(
         refreshToken,
-        process.env.JWT_REFRESH_SECRET_KEY
+        process.env.JWT_REFRESH_SECRET_KEY,
       );
 
       const user = await User.findById(decoded.id).select(
-        "+refreshTokenVersion"
+        "+refreshTokenVersion",
       );
 
       if (!user || !user.is_active) {
@@ -593,7 +570,7 @@ router.post(
       console.error("❌ Refresh token error:", error.message);
       return res.status(401).json({ detail: "Token refresh failed" });
     }
-  })
+  }),
 );
 
 router.get("/verify", (req, res) => {
@@ -611,14 +588,13 @@ router.get("/verify", (req, res) => {
         id: decoded.id,
         name: decoded.name,
         email: decoded.email,
-        role: decoded.role
-      }
+        role: decoded.role,
+      },
     });
   } catch (err) {
     return res.status(401).json({ loggedIn: false });
   }
 });
-
 
 router.post(
   "/admin-logout",
@@ -638,7 +614,7 @@ router.post(
     });
 
     res.status(200).json({ success: true, message: "Logged out successfully" });
-  })
+  }),
 );
 
 module.exports = router;
